@@ -1,5 +1,5 @@
 [project]
-name = "bourse-dashboard"
+name = "euroboard"
 version = "0.1"
 authors = ["Remi Brenaut"]
 requires-python = ">=3.14,<3.15"
