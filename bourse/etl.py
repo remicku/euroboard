@@ -184,6 +184,106 @@ def _detect_market_alias_from_euronext_market(market_str: str) -> str:
     return "paris"
 
 
+# ---- Store: Euronext ----
+
+
+def _store_euronext_files(start: str, end: str, db: TSDB):
+    """Load Euronext CSV/XLSX files. They contain daily OHLC so we insert
+    into both stocks and daystocks directly."""
+    start_dt = pd.to_datetime(start)
+    end_dt = pd.to_datetime(end)
+    euronext_dir = os.path.join(DATADIR, "euronext")
+
+    if not os.path.isdir(euronext_dir):
+        logger.warning(f"Euronext directory not found: {euronext_dir}")
+        return
+
+    all_files = sorted(
+        os.path.join(euronext_dir, f)
+        for f in os.listdir(euronext_dir)
+        if f.endswith(".csv") or f.endswith(".xlsx")
+    )
+    logger.info(f"Found {len(all_files)} euronext files")
+
+    company_cache = {}
+    stocks_rows = []
+    daystocks_rows = []
+
+    for fpath in all_files:
+        basename = os.path.basename(fpath)
+        file_date = _extract_date_from_euronext_filename(fpath)
+        if pd.isna(file_date) or file_date < start_dt or file_date >= end_dt:
+            continue
+
+        if _is_file_done(db, basename):
+            continue
+
+        logger.info(f"Processing {basename}")
+
+        try:
+            if fpath.endswith(".csv"):
+                df = _parse_euronext_csv(fpath)
+            else:
+                df = _parse_euronext_xlsx(fpath)
+        except Exception as e:
+            logger.error(f"Error reading {fpath}: {e}")
+            _mark_file_done(db, basename)
+            continue
+
+        if df.empty:
+            _mark_file_done(db, basename)
+            continue
+
+        for col in ["open", "high", "low", "last", "volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df.dropna(subset=["last"])
+        df = df[df["last"] > 0]
+
+        for _, row in df.iterrows():
+            symbol = str(row.get("symbol", ""))
+            name = str(row.get("name", ""))
+            isin = str(row.get("isin", "")) if pd.notna(row.get("isin")) else None
+            market_str = str(row.get("market", "")) if pd.notna(row.get("market")) else ""
+
+            cache_key = isin or symbol
+            if cache_key not in company_cache:
+                market_alias = _detect_market_alias_from_euronext_market(market_str)
+                cid = _get_or_create_company(db, name, symbol, isin=isin, market_alias=market_alias)
+                company_cache[cache_key] = cid
+
+            cid = company_cache[cache_key]
+            if cid is None:
+                continue
+
+            last_val = float(row["last"])
+            vol = float(row["volume"]) if pd.notna(row.get("volume")) else 0.0
+            open_val = float(row["open"]) if pd.notna(row.get("open")) else last_val
+            high_val = float(row["high"]) if pd.notna(row.get("high")) else last_val
+            low_val = float(row["low"]) if pd.notna(row.get("low")) else last_val
+
+            stocks_rows.append({"date": file_date, "cid": cid, "value": last_val, "volume": vol})
+            daystocks_rows.append({
+                "date": file_date, "cid": cid,
+                "open": open_val, "close": last_val, "high": high_val, "low": low_val,
+                "volume": vol, "mean": (open_val + high_val + low_val + last_val) / 4.0, "std": 0.0,
+            })
+
+        _mark_file_done(db, basename)
+
+        if len(stocks_rows) >= 5000:
+            _flush_stocks(db, pd.DataFrame(stocks_rows))
+            _flush_daystocks(db, pd.DataFrame(daystocks_rows))
+            stocks_rows = []
+            daystocks_rows = []
+
+    if stocks_rows:
+        _flush_stocks(db, pd.DataFrame(stocks_rows))
+    if daystocks_rows:
+        _flush_daystocks(db, pd.DataFrame(daystocks_rows))
+
+
 # ---- Decorator ----
 
 
@@ -202,4 +302,19 @@ def timer_decorator(func):
 
 @timer_decorator
 def store_files(start: str, end: str, website: str, db: TSDB):
-    raise NotImplementedError("The store_files function is not implemented")
+    """Extract, transform and load stock data files into the database.
+
+    Args:
+        start: Start date (inclusive) in YYYY-MM-DD format.
+        end: End date (exclusive) in YYYY-MM-DD format.
+        website: Source website - "euronext".
+        db: TimescaleStockMarketModel database instance.
+    """
+    logger.info(f"Loading {website} data from {start} to {end}")
+
+    if website == "euronext":
+        _store_euronext_files(start, end, db)
+    else:
+        raise ValueError(f"Unknown website: {website}. Use 'euronext'.")
+
+    logger.info(f"Done loading {website} data")
