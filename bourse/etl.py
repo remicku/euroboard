@@ -94,6 +94,73 @@ def _extract_date_from_euronext_filename(filepath: str) -> pd.Timestamp:
     return pd.NaT
 
 
+# ---- DB helpers ----
+
+
+def _get_or_create_company(db: TSDB, name: str, symbol: str, isin: str = None, market_alias: str = None) -> int:
+    rows = db.raw_query("SELECT id FROM companies WHERE symbol = %s", (symbol,))
+    if rows and len(rows) > 0:
+        return rows[0][0]
+
+    if isin:
+        rows = db.raw_query("SELECT id FROM companies WHERE isin = %s", (isin,))
+        if rows and len(rows) > 0:
+            return rows[0][0]
+
+    mid = 0
+    if market_alias and market_alias in db.market_id:
+        mid = db.market_id[market_alias]
+
+    db.raw_query(
+        "INSERT INTO companies (name, symbol, isin, mid) VALUES (%s, %s, %s, %s)",
+        (name, symbol, isin, mid),
+    )
+    db.commit()
+
+    rows = db.raw_query("SELECT id FROM companies WHERE symbol = %s", (symbol,))
+    if rows and len(rows) > 0:
+        return rows[0][0]
+    return None
+
+
+def _is_file_done(db: TSDB, filename: str) -> bool:
+    rows = db.raw_query("SELECT name FROM file_done WHERE name = %s", (filename,))
+    return rows is not None and len(rows) > 0
+
+
+def _mark_file_done(db: TSDB, filename: str):
+    try:
+        db.raw_query("INSERT INTO file_done (name) VALUES (%s)", (filename,))
+        db.commit()
+    except Exception:
+        db.commit()
+
+
+def _flush_stocks(db: TSDB, df: pd.DataFrame):
+    """Write a DataFrame to the stocks table."""
+    if df.empty:
+        return
+    out = df[["date", "cid", "value", "volume"]].copy()
+    out["date"] = pd.to_datetime(out["date"], utc=True)
+    out["value"] = out["value"].astype("float32")
+    out["volume"] = out["volume"].astype("float32")
+    db.df_write(out, "stocks", commit=True)
+    logger.info(f"Flushed {len(out)} stock records")
+
+
+def _flush_daystocks(db: TSDB, df: pd.DataFrame):
+    """Write a DataFrame to the daystocks table."""
+    if df.empty:
+        return
+    out = df[["date", "cid", "open", "close", "high", "low", "volume", "mean", "std"]].copy()
+    out["date"] = pd.to_datetime(out["date"], utc=True)
+    for col in ["open", "close", "high", "low", "volume", "mean", "std"]:
+        out[col] = out[col].astype("float32")
+    out["cid"] = out["cid"].astype("int16")
+    db.df_write(out, "daystocks", commit=True)
+    logger.info(f"Flushed {len(out)} daystocks records")
+
+
 # ---- Market detection ----
 
 
