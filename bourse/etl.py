@@ -284,6 +284,132 @@ def _store_euronext_files(start: str, end: str, db: TSDB):
         _flush_daystocks(db, pd.DataFrame(daystocks_rows))
 
 
+# ---- Store: Boursorama ----
+
+
+def _store_bourso_files(start: str, end: str, db: TSDB):
+    """Load ALL boursorama intraday bz2 pickle files into the database.
+
+    1. Read every snapshot file into memory with pandas
+    2. Store all intraday points in `stocks`
+    3. Compute daily OHLC aggregates with pandas groupby -> `daystocks`
+    """
+    start_dt = pd.to_datetime(start)
+    end_dt = pd.to_datetime(end)
+    bourso_dir = os.path.join(DATADIR, "bourso")
+
+    if not os.path.isdir(bourso_dir):
+        logger.warning(f"Bourso directory not found: {bourso_dir}")
+        return
+
+    done_key = f"bourso_all_{start}_{end}"
+    if _is_file_done(db, done_key):
+        logger.info("Bourso data already imported for this range, skipping")
+        return
+
+    # ---- Step 1: Collect and group files by day ----
+    files_by_day = defaultdict(list)
+    for year_dir in sorted(os.listdir(bourso_dir)):
+        year_path = os.path.join(bourso_dir, year_dir)
+        if not os.path.isdir(year_path):
+            continue
+        for f in os.listdir(year_path):
+            if not f.endswith(".bz2"):
+                continue
+            match = re.match(r"comp[AB]\s+(\d{4}-\d{2}-\d{2})\s", f)
+            if not match:
+                continue
+            day_str = match.group(1)
+            day_dt = pd.to_datetime(day_str)
+            if day_dt < start_dt or day_dt >= end_dt:
+                continue
+            files_by_day[day_str].append(os.path.join(year_path, f))
+
+    total_days = len(files_by_day)
+    total_files = sum(len(v) for v in files_by_day.values())
+    logger.info(f"Bourso: {total_files} files across {total_days} days")
+
+    # ---- Step 2: Create companies from the first day's data ----
+    company_cache = {}
+
+    first_day = sorted(files_by_day.keys())[0]
+    for fpath in files_by_day[first_day][:2]:  # read one compA + one compB
+        result = _parse_bourso_file(fpath)
+        if result is not None:
+            for _, row in result.iterrows():
+                symbol = row["symbol"]
+                name = row["name"]
+                if symbol not in company_cache:
+                    market_alias = _detect_market_alias_from_bourso_symbol(symbol)
+                    cid = _get_or_create_company(db, name, symbol, market_alias=market_alias)
+                    company_cache[symbol] = cid
+
+    logger.info(f"Created/cached {len(company_cache)} companies from first day")
+
+    # ---- Step 3: Process each day - read all files, build stocks DataFrame ----
+    days_processed = 0
+
+    for day_str in sorted(files_by_day.keys()):
+        day_files = files_by_day[day_str]
+        day_dfs = []
+
+        for fpath in day_files:
+            result = _parse_bourso_file(fpath)
+            if result is not None:
+                day_dfs.append(result)
+
+        if not day_dfs:
+            continue
+
+        # Concatenate all snapshots for this day
+        day_df = pd.concat(day_dfs, ignore_index=True)
+        day_df = day_df.dropna(subset=["last"])
+
+        # Ensure all companies exist
+        new_symbols = set(day_df["symbol"].unique()) - set(company_cache.keys())
+        if new_symbols:
+            for _, row in day_df[day_df["symbol"].isin(new_symbols)].drop_duplicates("symbol").iterrows():
+                symbol = row["symbol"]
+                if symbol not in company_cache:
+                    market_alias = _detect_market_alias_from_bourso_symbol(symbol)
+                    cid = _get_or_create_company(db, row["name"], symbol, market_alias=market_alias)
+                    company_cache[symbol] = cid
+
+        # Map symbols to cids using pandas
+        day_df["cid"] = day_df["symbol"].map(company_cache)
+        day_df = day_df.dropna(subset=["cid"])
+        day_df["cid"] = day_df["cid"].astype(int)
+
+        # ---- Insert into stocks (all intraday points) ----
+        stocks_df = day_df[["datetime", "cid", "last", "volume"]].rename(
+            columns={"datetime": "date", "last": "value"}
+        )
+        _flush_stocks(db, stocks_df)
+
+        # ---- Compute daystocks with pandas groupby ----
+        daily = day_df.groupby("cid").agg(
+            open=("last", "first"),
+            close=("last", "last"),
+            high=("last", "max"),
+            low=("last", "min"),
+            volume=("volume", "last"),  # last reported volume of the day
+            mean=("last", "mean"),
+            std=("last", "std"),
+        ).reset_index()
+
+        daily["std"] = daily["std"].fillna(0.0)
+        daily["date"] = pd.to_datetime(day_str)
+
+        _flush_daystocks(db, daily)
+
+        days_processed += 1
+        if days_processed % 50 == 0:
+            logger.info(f"Bourso: {days_processed}/{total_days} days done")
+
+    _mark_file_done(db, done_key)
+    logger.info(f"Bourso import complete: {days_processed} days, all intraday data stored")
+
+
 # ---- Decorator ----
 
 
@@ -307,14 +433,16 @@ def store_files(start: str, end: str, website: str, db: TSDB):
     Args:
         start: Start date (inclusive) in YYYY-MM-DD format.
         end: End date (exclusive) in YYYY-MM-DD format.
-        website: Source website - "euronext".
+        website: Source website - "bourso" or "euronext".
         db: TimescaleStockMarketModel database instance.
     """
     logger.info(f"Loading {website} data from {start} to {end}")
 
-    if website == "euronext":
+    if website == "bourso":
+        _store_bourso_files(start, end, db)
+    elif website == "euronext":
         _store_euronext_files(start, end, db)
     else:
-        raise ValueError(f"Unknown website: {website}. Use 'euronext'.")
+        raise ValueError(f"Unknown website: {website}. Use 'bourso' or 'euronext'.")
 
     logger.info(f"Done loading {website} data")
