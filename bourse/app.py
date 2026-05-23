@@ -203,6 +203,10 @@ def render_tab(active_tab, selected_stocks, start_date, end_date, chart_type, sc
         return render_prices(cids, start_date, end_date, chart_type, scale_type)
     elif active_tab == "tab-bollinger":
         return render_bollinger(cids, start_date, end_date, scale_type)
+    elif active_tab == "tab-data":
+        return render_data_table(cids, start_date, end_date)
+    elif active_tab == "tab-performance":
+        return render_performance(cids, start_date, end_date)
 
     return html.Div()
 
@@ -339,6 +343,105 @@ def render_bollinger(cids, start_date, end_date, scale_type):
         return tabs_content[0].children
 
     return dbc.Tabs(tabs_content)
+
+
+def render_data_table(cids, start_date, end_date):
+    """Render raw data table with daily stats: min, max, open, close, mean, std."""
+    df = get_daystocks(cids, start_date, end_date)
+    if df.empty:
+        return dbc.Alert("No data for this selection.", color="warning")
+
+    # Build the table: one row per day per stock
+    df = df.sort_values(["date", "name"])
+    table_df = pd.DataFrame(
+        {
+            "Date": df["date"].dt.strftime("%Y-%m-%d"),
+            "Stock": df["name"],
+            "Open": df["open"].round(4),
+            "Close": df["close"].round(4),
+            "Min": df["low"].round(4),
+            "Max": df["high"].round(4),
+            "Mean": df["mean"].round(4),
+            "Std dev": df["std"].round(4),
+            "Volume": df["volume"].astype(int),
+        }
+    )
+
+    return dash_table.DataTable(
+        data=table_df.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in table_df.columns],
+        page_size=25,
+        sort_action="native",
+        filter_action="native",
+        style_table={"overflowX": "auto"},
+        style_cell={"textAlign": "center", "padding": "8px", "fontSize": "14px"},
+        style_header={"backgroundColor": "#f8f9fa", "fontWeight": "bold"},
+        style_data_conditional=[
+            {"if": {"row_index": "odd"}, "backgroundColor": "#f2f2f2"}
+        ],
+        export_format="csv",
+    )
+
+
+def render_performance(cids, start_date, end_date):
+    """Custom feature: normalized performance comparison (% change from start)."""
+    df = get_daystocks(cids, start_date, end_date)
+    if df.empty:
+        return dbc.Alert("No data for this selection.", color="warning")
+
+    fig = go.Figure()
+
+    for name, group in df.groupby("name"):
+        group = group.sort_values("date")
+        first_close = group["close"].iloc[0]
+        if first_close == 0 or pd.isna(first_close):
+            continue
+        perf = ((group["close"] / first_close) - 1) * 100
+
+        fig.add_trace(
+            go.Scatter(
+                x=group["date"],
+                y=perf,
+                mode="lines",
+                name=name,
+            )
+        )
+
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+
+    fig.update_layout(
+        title="Performance comparison (% change from start of period)",
+        xaxis_title="Date",
+        yaxis_title="Change (%)",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=600,
+    )
+
+    # Also show a volume subplot
+    vol_fig = go.Figure()
+    for name, group in df.groupby("name"):
+        group = group.sort_values("date")
+        vol_fig.add_trace(
+            go.Bar(
+                x=group["date"],
+                y=group["volume"],
+                name=name,
+                opacity=0.7,
+            )
+        )
+
+    vol_fig.update_layout(
+        title="Traded volume",
+        xaxis_title="Date",
+        yaxis_title="Volume",
+        barmode="group",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=400,
+    )
+
+    return html.Div([dcc.Graph(figure=fig), dcc.Graph(figure=vol_fig)])
 
 
 # =====================================================================
