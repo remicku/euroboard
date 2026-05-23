@@ -183,6 +183,78 @@ def init_controls(_):
     return options, str(min_d), str(max_d), str(min_d), str(max_d)
 
 
+@callback(
+    Output("tab-content", "children"),
+    Input("tabs", "active_tab"),
+    Input("stock-selector", "value"),
+    Input("date-range", "start_date"),
+    Input("date-range", "end_date"),
+    Input("chart-type", "value"),
+    Input("scale-type", "value"),
+)
+def render_tab(active_tab, selected_stocks, start_date, end_date, chart_type, scale_type):
+    """Render the content of the active tab."""
+    if not selected_stocks or not start_date or not end_date:
+        return dbc.Alert("Select at least one stock and a date range.", color="info")
+
+    cids = selected_stocks if isinstance(selected_stocks, list) else [selected_stocks]
+
+    if active_tab == "tab-prices":
+        return render_prices(cids, start_date, end_date, chart_type, scale_type)
+
+    return html.Div()
+
+
+# =====================================================================
+# Tab renderers
+# =====================================================================
+
+
+def render_prices(cids, start_date, end_date, chart_type, scale_type):
+    """Render the stock price chart (line or candlestick)."""
+    df = get_daystocks(cids, start_date, end_date)
+    if df.empty:
+        return dbc.Alert("No data for this selection.", color="warning")
+
+    fig = go.Figure()
+
+    for name, group in df.groupby("name"):
+        group = group.sort_values("date")
+        if chart_type == "candlestick":
+            fig.add_trace(
+                go.Candlestick(
+                    x=group["date"],
+                    open=group["open"],
+                    high=group["high"],
+                    low=group["low"],
+                    close=group["close"],
+                    name=name,
+                )
+            )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=group["date"],
+                    y=group["close"],
+                    mode="lines",
+                    name=name,
+                )
+            )
+
+    fig.update_layout(
+        title="Stock prices",
+        xaxis_title="Date",
+        yaxis_title="Price",
+        yaxis_type=scale_type,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis_rangeslider_visible=False,
+        height=600,
+    )
+
+    return dcc.Graph(figure=fig)
+
+
 # =====================================================================
 # Main
 # =====================================================================
