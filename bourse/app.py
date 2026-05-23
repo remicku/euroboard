@@ -201,6 +201,8 @@ def render_tab(active_tab, selected_stocks, start_date, end_date, chart_type, sc
 
     if active_tab == "tab-prices":
         return render_prices(cids, start_date, end_date, chart_type, scale_type)
+    elif active_tab == "tab-bollinger":
+        return render_bollinger(cids, start_date, end_date, scale_type)
 
     return html.Div()
 
@@ -253,6 +255,90 @@ def render_prices(cids, start_date, end_date, chart_type, scale_type):
     )
 
     return dcc.Graph(figure=fig)
+
+
+def render_bollinger(cids, start_date, end_date, scale_type):
+    """Render Bollinger Bands for the first selected stock."""
+    df = get_daystocks(cids, start_date, end_date)
+    if df.empty:
+        return dbc.Alert("No data for this selection.", color="warning")
+
+    # Build a selector for which stock to show Bollinger bands
+    stock_names = df[["cid", "name"]].drop_duplicates()
+    tabs_content = []
+
+    for _, stock_row in stock_names.iterrows():
+        cid = stock_row["cid"]
+        name = stock_row["name"]
+        group = df[df["cid"] == cid].sort_values("date").copy()
+
+        # Compute Bollinger Bands (20-day SMA, 2 std dev)
+        window = 20
+        group["sma"] = group["close"].rolling(window=window).mean()
+        group["std_val"] = group["close"].rolling(window=window).std()
+        group["upper"] = group["sma"] + 2 * group["std_val"]
+        group["lower"] = group["sma"] - 2 * group["std_val"]
+
+        fig = go.Figure()
+
+        # Upper band
+        fig.add_trace(
+            go.Scatter(
+                x=group["date"],
+                y=group["upper"],
+                mode="lines",
+                line=dict(width=1, color="rgba(100,100,100,0.3)"),
+                name="Upper band",
+            )
+        )
+        # Lower band (fill between)
+        fig.add_trace(
+            go.Scatter(
+                x=group["date"],
+                y=group["lower"],
+                mode="lines",
+                line=dict(width=1, color="rgba(100,100,100,0.3)"),
+                fill="tonexty",
+                fillcolor="rgba(100,149,237,0.15)",
+                name="Lower band",
+            )
+        )
+        # SMA
+        fig.add_trace(
+            go.Scatter(
+                x=group["date"],
+                y=group["sma"],
+                mode="lines",
+                line=dict(width=1.5, color="orange", dash="dash"),
+                name=f"SMA {window}d",
+            )
+        )
+        # Close price
+        fig.add_trace(
+            go.Scatter(
+                x=group["date"],
+                y=group["close"],
+                mode="lines",
+                line=dict(width=2, color="blue"),
+                name="Price",
+            )
+        )
+
+        fig.update_layout(
+            title=f"Bollinger bands - {name}",
+            xaxis_title="Date",
+            yaxis_title="Price",
+            yaxis_type=scale_type,
+            hovermode="x unified",
+            height=500,
+        )
+
+        tabs_content.append(dbc.Tab(label=name, children=[dcc.Graph(figure=fig)]))
+
+    if len(tabs_content) == 1:
+        return tabs_content[0].children
+
+    return dbc.Tabs(tabs_content)
 
 
 # =====================================================================
