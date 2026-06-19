@@ -1,0 +1,7 @@
+services:
+  dashboard:
+    volumes:
+      - ./bourse:/workspace/bourse
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DASH_DEBUG=1
