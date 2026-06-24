@@ -302,11 +302,6 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
         logger.warning(f"Bourso directory not found: {bourso_dir}")
         return
 
-    done_key = f"bourso_all_{start}_{end}"
-    if _is_file_done(db, done_key):
-        logger.info("Bourso data already imported for this range, skipping")
-        return
-
     # ---- Step 1: Collect and group files by day ----
     files_by_day = defaultdict(list)
     for year_dir in sorted(os.listdir(bourso_dir)):
@@ -329,6 +324,10 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
     total_files = sum(len(v) for v in files_by_day.values())
     logger.info(f"Bourso: {total_files} files across {total_days} days")
 
+    if not files_by_day:
+        logger.warning(f"No boursorama file in range {start} -> {end}, nothing to import")
+        return
+
     # ---- Step 2: Create companies from the first day's data ----
     company_cache = {}
 
@@ -350,6 +349,10 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
     days_processed = 0
 
     for day_str in sorted(files_by_day.keys()):
+        day_key = f"bourso_day_{day_str}"
+        if _is_file_done(db, day_key):
+            continue
+
         day_files = files_by_day[day_str]
         day_dfs = []
 
@@ -401,13 +404,13 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
         daily["date"] = pd.to_datetime(day_str)
 
         _flush_daystocks(db, daily)
+        _mark_file_done(db, day_key)
 
         days_processed += 1
         if days_processed % 50 == 0:
             logger.info(f"Bourso: {days_processed}/{total_days} days done")
 
-    _mark_file_done(db, done_key)
-    logger.info(f"Bourso import complete: {days_processed} days, all intraday data stored")
+    logger.info(f"Bourso import complete: {days_processed} days imported, {total_days - days_processed} already present")
 
 
 # ---- Decorator ----
