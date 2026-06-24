@@ -10,9 +10,9 @@ services:
       - POSTGRES_USER=bourse
       - POSTGRES_PASSWORD=password
     volumes:
-      - /tmp/bourse/timescaledb:/var/lib/postgresql/data/timescaledb
+      - timescaledb-data:/var/lib/postgresql/data/timescaledb
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U bourse bourse" ]
+      test: [ "CMD-SHELL", "pg_isready -U bourse -d bourse" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -23,13 +23,17 @@ services:
       dockerfile: Dockerfile
     container_name: bourse-dashboard
     depends_on:
-      - database
+      database:
+        condition: service_healthy
     networks: [ boursenet ]
     ports:
       - "8050:8050"
-    restart: unless-stopped
+    restart: on-failure:3
     volumes:
-      - ./data:/mnt/data
+      - ./data:/mnt/data:ro
+
+volumes:
+  timescaledb-data:
 
 networks:
   boursenet:
