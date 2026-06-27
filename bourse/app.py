@@ -11,6 +11,13 @@ from etl import store_files
 
 from loguru import logger
 
+# Date ranges imported on startup. Override with environment variables to load
+# a different slice of the dataset without touching the code.
+EURONEXT_START = os.getenv("EURONEXT_START", "2020-05-01")
+EURONEXT_END = os.getenv("EURONEXT_END", "2022-09-16")
+BOURSO_START = os.getenv("BOURSO_START", "2020-01-01")
+BOURSO_END = os.getenv("BOURSO_END", "2022-01-01")
+
 external_stylesheets = [dbc.themes.BOOTSTRAP]
 app = dash.Dash(
     __name__,
@@ -35,32 +42,18 @@ def get_daystocks(cids, start_date, end_date):
     """Get daily stock data for given company ids and date range."""
     if not cids:
         return pd.DataFrame()
-    cid_list = ",".join(str(c) for c in cids)
     query = """
         SELECT d.date, d.cid, d.open, d.close, d.high, d.low, d.volume, d.mean, d.std, c.name
         FROM daystocks d
         JOIN companies c ON c.id = d.cid
-        WHERE d.cid IN (%s) AND d.date >= '%s' AND d.date <= '%s'
+        WHERE d.cid = ANY(%(cids)s) AND d.date >= %(start)s AND d.date <= %(end)s
         ORDER BY d.date
-    """ % (cid_list, start_date, end_date)
-    df = db.df_query(query, parse_dates=["date"])
-    return df
-
-
-def get_stocks_intraday(cids, start_date, end_date):
-    """Get intraday stock data."""
-    if not cids:
-        return pd.DataFrame()
-    cid_list = ",".join(str(c) for c in cids)
-    query = """
-        SELECT s.date, s.cid, s.value, s.volume, c.name
-        FROM stocks s
-        JOIN companies c ON c.id = s.cid
-        WHERE s.cid IN (%s) AND s.date >= '%s' AND s.date <= '%s'
-        ORDER BY s.date
-    """ % (cid_list, start_date, end_date)
-    df = db.df_query(query, parse_dates=["date"])
-    return df
+    """
+    return db.df_query(
+        query,
+        params={"cids": [int(c) for c in cids], "start": start_date, "end": end_date},
+        parse_dates=["date"],
+    )
 
 
 # =====================================================================
@@ -450,8 +443,8 @@ def render_performance(cids, start_date, end_date):
 
 if __name__ == "__main__":
     logger.info("Importing data into the database")
-    store_files("2020-05-01", "2022-09-16", "euronext", db)
-    store_files("2020-01-01", "2022-01-01", "bourso", db)
+    store_files(EURONEXT_START, EURONEXT_END, "euronext", db)
+    store_files(BOURSO_START, BOURSO_END, "bourso", db)
     logger.info("Import done")
     logger.info("Starting dashboard server")
     app.run(host="0.0.0.0", port=8050, debug=os.getenv("DASH_DEBUG", "0") == "1")
