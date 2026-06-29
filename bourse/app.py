@@ -21,7 +21,7 @@ BOURSO_END = os.getenv("BOURSO_END", "2022-01-01")
 external_stylesheets = [dbc.themes.BOOTSTRAP]
 app = dash.Dash(
     __name__,
-    title="Bourse Dashboard",
+    title="EuroBoard",
     suppress_callback_exceptions=True,
     external_stylesheets=external_stylesheets,
 )
@@ -63,7 +63,7 @@ def get_daystocks(cids, start_date, end_date):
 app.layout = dbc.Container(
     [
         dbc.Row(
-            dbc.Col(html.H1("Bourse Dashboard", className="text-center my-4")),
+            dbc.Col(html.H1("EuroBoard", className="text-center my-4")),
         ),
         # Controls row
         dbc.Row(
