@@ -33,9 +33,19 @@ db = tsdb.TimescaleStockMarketModel("bourse", "bourse", "database", "password")
 
 
 def get_companies():
-    """Get list of companies from the database."""
-    df = db.df_query("SELECT id, name, symbol FROM companies ORDER BY name")
-    return df
+    """Get the companies, each labelled with the market it is listed on.
+
+    A company cross-listed on two exchanges has one entry per market, with its
+    own order book, so the market has to be part of how it is identified.
+    """
+    return db.df_query(
+        """
+        SELECT c.id, c.name, c.symbol, COALESCE(m.name, 'Unknown') AS market
+        FROM companies c
+        LEFT JOIN markets m ON m.id = c.mid
+        ORDER BY c.name, market
+        """
+    )
 
 
 def get_daystocks(cids, start_date, end_date):
@@ -43,9 +53,11 @@ def get_daystocks(cids, start_date, end_date):
     if not cids:
         return pd.DataFrame()
     query = """
-        SELECT d.date, d.cid, d.open, d.close, d.high, d.low, d.volume, d.mean, d.std, c.name
+        SELECT d.date, d.cid, d.open, d.close, d.high, d.low, d.volume, d.mean, d.std,
+               c.name, c.name || ' - ' || COALESCE(m.name, 'Unknown') AS label
         FROM daystocks d
         JOIN companies c ON c.id = d.cid
+        LEFT JOIN markets m ON m.id = c.mid
         WHERE d.cid = ANY(%(cids)s) AND d.date >= %(start)s AND d.date <= %(end)s
         ORDER BY d.date
     """
@@ -159,7 +171,10 @@ def init_controls(_):
     """Populate the stock selector and date range on page load."""
     companies = get_companies()
     logger.info(f"Found {len(companies)} companies in database")
-    options = [{"label": row["name"], "value": row["id"]} for _, row in companies.iterrows()]
+    options = [
+        {"label": f"{row['name']} - {row['market']}", "value": row["id"]}
+        for _, row in companies.iterrows()
+    ]
 
     # Try daystocks first, fallback to stocks
     dates = db.df_query("SELECT MIN(date) as min_d, MAX(date) as max_d FROM daystocks")
@@ -217,7 +232,7 @@ def render_prices(cids, start_date, end_date, chart_type, scale_type):
 
     fig = go.Figure()
 
-    for name, group in df.groupby("name"):
+    for name, group in df.groupby("label"):
         group = group.sort_values("date")
         if chart_type == "candlestick":
             fig.add_trace(
@@ -261,12 +276,12 @@ def render_bollinger(cids, start_date, end_date, scale_type):
         return dbc.Alert("No data for this selection.", color="warning")
 
     # Build a selector for which stock to show Bollinger bands
-    stock_names = df[["cid", "name"]].drop_duplicates()
+    stock_names = df[["cid", "label"]].drop_duplicates()
     tabs_content = []
 
     for _, stock_row in stock_names.iterrows():
         cid = stock_row["cid"]
-        name = stock_row["name"]
+        name = stock_row["label"]
         group = df[df["cid"] == cid].sort_values("date").copy()
 
         # Compute Bollinger Bands (20-day SMA, 2 std dev)
@@ -349,7 +364,7 @@ def render_data_table(cids, start_date, end_date):
     table_df = pd.DataFrame(
         {
             "Date": df["date"].dt.strftime("%Y-%m-%d"),
-            "Stock": df["name"],
+            "Stock": df["label"],
             "Open": df["open"].round(4),
             "Close": df["close"].round(4),
             "Min": df["low"].round(4),
@@ -384,7 +399,7 @@ def render_performance(cids, start_date, end_date):
 
     fig = go.Figure()
 
-    for name, group in df.groupby("name"):
+    for name, group in df.groupby("label"):
         group = group.sort_values("date")
         first_close = group["close"].iloc[0]
         if first_close == 0 or pd.isna(first_close):
@@ -413,7 +428,7 @@ def render_performance(cids, start_date, end_date):
 
     # Also show a volume subplot
     vol_fig = go.Figure()
-    for name, group in df.groupby("name"):
+    for name, group in df.groupby("label"):
         group = group.sort_values("date")
         vol_fig.add_trace(
             go.Bar(
