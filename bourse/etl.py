@@ -98,18 +98,26 @@ def _extract_date_from_euronext_filename(filepath: str) -> pd.Timestamp:
 
 
 def _get_or_create_company(db: TSDB, name: str, symbol: str, isin: str = None, market_alias: str = None) -> int:
-    rows = db.raw_query("SELECT id FROM companies WHERE symbol = %s", (symbol,))
-    if rows and len(rows) > 0:
-        return rows[0][0]
+    """Resolve a company to its id, creating it on first sight.
+
+    ISIN is the strongest key but only Euronext carries one, so the symbol is
+    matched together with the market: the same ticker can designate different
+    companies on Paris and on Amsterdam.
+    """
+    mid = 0
+    if market_alias and market_alias in db.market_id:
+        mid = db.market_id[market_alias]
 
     if isin:
         rows = db.raw_query("SELECT id FROM companies WHERE isin = %s", (isin,))
         if rows and len(rows) > 0:
             return rows[0][0]
 
-    mid = 0
-    if market_alias and market_alias in db.market_id:
-        mid = db.market_id[market_alias]
+    rows = db.raw_query(
+        "SELECT id FROM companies WHERE symbol = %s AND mid = %s", (symbol, mid)
+    )
+    if rows and len(rows) > 0:
+        return rows[0][0]
 
     db.raw_query(
         "INSERT INTO companies (name, symbol, isin, mid) VALUES (%s, %s, %s, %s)",
@@ -117,7 +125,9 @@ def _get_or_create_company(db: TSDB, name: str, symbol: str, isin: str = None, m
     )
     db.commit()
 
-    rows = db.raw_query("SELECT id FROM companies WHERE symbol = %s", (symbol,))
+    rows = db.raw_query(
+        "SELECT id FROM companies WHERE symbol = %s AND mid = %s", (symbol, mid)
+    )
     if rows and len(rows) > 0:
         return rows[0][0]
     return None
@@ -140,6 +150,7 @@ def _flush_stocks(db: TSDB, df: pd.DataFrame):
     """Write a DataFrame to the stocks table."""
     if df.empty:
         return
+    df = df.drop_duplicates(subset=["date", "cid"], keep="last")
     out = df[["date", "cid", "value", "volume"]].copy()
     out["date"] = pd.to_datetime(out["date"], utc=True)
     out["value"] = out["value"].astype("float32")
@@ -149,9 +160,16 @@ def _flush_stocks(db: TSDB, df: pd.DataFrame):
 
 
 def _flush_daystocks(db: TSDB, df: pd.DataFrame):
-    """Write a DataFrame to the daystocks table."""
+    """Write a DataFrame to the daystocks table.
+
+    A company has one aggregate per day by definition. Euronext can still emit
+    two rows for it: when a security is reclassified the new ISIN trades under
+    the old ticker for a while, and both lines are reported side by side. Keep
+    the most recent one so the series stays single-valued.
+    """
     if df.empty:
         return
+    df = df.drop_duplicates(subset=["date", "cid"], keep="last")
     out = df[["date", "cid", "open", "close", "high", "low", "volume", "mean", "std"]].copy()
     out["date"] = pd.to_datetime(out["date"], utc=True)
     for col in ["open", "close", "high", "low", "volume", "mean", "std"]:
@@ -164,6 +182,18 @@ def _flush_daystocks(db: TSDB, df: pd.DataFrame):
 # ---- Market detection ----
 
 
+def _strip_bourso_prefix(symbol: str) -> str:
+    """Remove the market code Boursorama prepends to its symbols.
+
+    Boursorama writes "1rPSAN" where Euronext writes "SAN". Without stripping
+    it the same company is created twice and its history is split in two.
+    """
+    for mid, name, alias, bourso_prefix, sws, euronext in tsdb.initial_markets_data:
+        if bourso_prefix and symbol.startswith(bourso_prefix):
+            return symbol[len(bourso_prefix):]
+    return symbol
+
+
 def _detect_market_alias_from_bourso_symbol(symbol: str) -> str:
     for mid, name, alias, bourso_prefix, sws, euronext in tsdb.initial_markets_data:
         if bourso_prefix and symbol.startswith(bourso_prefix):
@@ -171,17 +201,33 @@ def _detect_market_alias_from_bourso_symbol(symbol: str) -> str:
     return "paris"
 
 
+# Needle to look for in the Euronext "Market" column, and the market it maps to.
+_EURONEXT_MARKETS = (
+    ("paris", "paris"),
+    ("amsterdam", "amsterdam"),
+    ("bruxel", "bruxelle"),
+    ("brussel", "bruxelle"),
+    ("milan", "milano"),
+)
+
+
 def _detect_market_alias_from_euronext_market(market_str: str) -> str:
+    """Pick the primary market of a listing.
+
+    A cross-listed stock reads "Euronext Paris, Amsterdam, Brussels": the
+    primary market is the one named first, so match on position rather than on
+    a fixed order, otherwise a Paris stock is filed under Amsterdam.
+    """
     if not market_str or pd.isna(market_str):
         return "paris"
     market_lower = str(market_str).lower()
-    if "amsterdam" in market_lower:
-        return "amsterdam"
-    if "bruxel" in market_lower or "brussel" in market_lower:
-        return "bruxelle"
-    if "milan" in market_lower:
-        return "milano"
-    return "paris"
+
+    best = None
+    for needle, alias in _EURONEXT_MARKETS:
+        pos = market_lower.find(needle)
+        if pos >= 0 and (best is None or pos < best[0]):
+            best = (pos, alias)
+    return best[1] if best else "paris"
 
 
 # ---- Store: Euronext ----
@@ -340,7 +386,9 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
                 name = row["name"]
                 if symbol not in company_cache:
                     market_alias = _detect_market_alias_from_bourso_symbol(symbol)
-                    cid = _get_or_create_company(db, name, symbol, market_alias=market_alias)
+                    cid = _get_or_create_company(
+                        db, name, _strip_bourso_prefix(symbol), market_alias=market_alias
+                    )
                     company_cache[symbol] = cid
 
     logger.info(f"Created/cached {len(company_cache)} companies from first day")
@@ -375,7 +423,9 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
                 symbol = row["symbol"]
                 if symbol not in company_cache:
                     market_alias = _detect_market_alias_from_bourso_symbol(symbol)
-                    cid = _get_or_create_company(db, row["name"], symbol, market_alias=market_alias)
+                    cid = _get_or_create_company(
+                        db, row["name"], _strip_bourso_prefix(symbol), market_alias=market_alias
+                    )
                     company_cache[symbol] = cid
 
         # Map symbols to cids using pandas
@@ -402,6 +452,17 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
 
         daily["std"] = daily["std"].fillna(0.0)
         daily["date"] = pd.to_datetime(day_str)
+
+        # Euronext may already have written an end-of-day row for this company
+        # and day. The Boursorama aggregate is computed from the intraday points
+        # of the session, so it supersedes it: drop the old row before writing.
+        day_cids = [int(c) for c in daily["cid"].unique()]
+        if day_cids:
+            db.raw_query(
+                "DELETE FROM daystocks WHERE date = %s AND cid = ANY(%s)",
+                (pd.to_datetime(day_str), day_cids),
+            )
+            db.commit()
 
         _flush_daystocks(db, daily)
         _mark_file_done(db, day_key)
