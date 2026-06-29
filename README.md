@@ -4,7 +4,7 @@ Interactive dashboard for European stock market data, backed by a TimescaleDB
 hypertable store and an ETL pipeline that ingests raw exchange data files.
 
 Two years of Paris, Amsterdam, Brussels and Milan equities — roughly 12 million
-intraday points across 1 400+ companies — queried interactively from the browser.
+intraday points across 1 300+ companies — queried interactively from the browser.
 
 ![EuroBoard dashboard](docs/images/overview.png)
 
@@ -52,8 +52,17 @@ computed from them with a pandas `groupby`. Both are hypertables partitioned on
 ## Getting the data
 
 The dataset is not in this repository — it is several gigabytes of raw exchange
-files. Download it and unpack it into `./data`, which is mounted into the
-container at `/mnt/data`:
+files. Download both archives and unpack them into `./data`, which is mounted
+into the container at `/mnt/data`:
+
+```bash
+mkdir -p data && cd data
+curl -O https://www.lrde.epita.fr/~ricou/pybd/projet/bourso.tgz
+curl -O https://www.lrde.epita.fr/~ricou/pybd/projet/euronext.tgz
+tar xzf bourso.tgz && tar xzf euronext.tgz
+```
+
+The result should look like this:
 
 ```
 data/
