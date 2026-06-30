@@ -7,6 +7,8 @@ import warnings
 from collections import defaultdict
 
 import pandas as pd
+from pandas._libs.internals import BlockPlacement
+from pandas.core.internals.blocks import new_block
 from loguru import logger
 
 import timescaledb_model as tsdb
@@ -17,16 +19,47 @@ TSDB = tsdb.TimescaleStockMarketModel
 DATADIR = "/mnt/data/"  # contains bourso/ and euronext/ subdirectories
 
 
+def _new_block_compat(values, placement, ndim, **kwargs):
+    """Rebuild a block from a pickle that stored its placement as a plain slice."""
+    if not isinstance(placement, BlockPlacement):
+        placement = BlockPlacement(placement)
+    return new_block(values, placement, ndim=ndim, **kwargs)
+
+
 class _CompatUnpickler(pickle.Unpickler):
-    """Handle old pandas pickle format (pandas.indexes -> pandas.core.indexes)."""
+    """Read Boursorama pickles whatever pandas wrote them.
+
+    Two formats coexist in the archive. The oldest ones reference
+    pandas.indexes, moved to pandas.core.indexes since. Those written from
+    August 2023 onwards pass the block placement as a slice, which the current
+    new_block refuses; wrap it back into a BlockPlacement.
+    """
 
     def find_class(self, module, name):
         if module.startswith("pandas.indexes"):
             module = module.replace("pandas.indexes", "pandas.core.indexes")
+        if module == "pandas.core.internals.blocks" and name == "new_block":
+            return _new_block_compat
         return super().find_class(module, name)
 
 
 # ---- Parsing helpers ----
+
+
+def _to_number(series: pd.Series) -> pd.Series:
+    """Parse Boursorama quotes, which are not plain numbers.
+
+    A quote carries a one-letter status between parentheses -- "58.010(c)" is a
+    closing price, "315.000(s)" a suspended one -- and thousands are separated
+    by a space: "1 157.500". Reading them as-is silently dropped about 40% of
+    every snapshot.
+    """
+    return pd.to_numeric(
+        series.astype(str)
+        .str.replace(r"\([a-zA-Z]\)", "", regex=True)
+        .str.replace(r"[\s\u00a0\u202f]", "", regex=True),
+        errors="coerce",
+    )
 
 
 def _parse_bourso_file(filepath: str):
@@ -52,8 +85,8 @@ def _parse_bourso_file(filepath: str):
         return None
 
     df = df.reset_index(drop=True)
-    df["last"] = pd.to_numeric(df["last"], errors="coerce")
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+    df["last"] = _to_number(df["last"])
+    df["volume"] = _to_number(df["volume"])
     df["datetime"] = dt
     return df[["symbol", "name", "last", "volume", "datetime"]]
 
@@ -395,10 +428,13 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
 
     # ---- Step 3: Process each day - read all files, build stocks DataFrame ----
     days_processed = 0
+    days_known = 0
+    days_unreadable = 0
 
     for day_str in sorted(files_by_day.keys()):
         day_key = f"bourso_day_{day_str}"
         if _is_file_done(db, day_key):
+            days_known += 1
             continue
 
         day_files = files_by_day[day_str]
@@ -410,6 +446,10 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
                 day_dfs.append(result)
 
         if not day_dfs:
+            days_unreadable += 1
+            logger.warning(
+                f"Bourso: none of the {len(day_files)} files for {day_str} could be read"
+            )
             continue
 
         # Concatenate all snapshots for this day
@@ -471,7 +511,10 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
         if days_processed % 50 == 0:
             logger.info(f"Bourso: {days_processed}/{total_days} days done")
 
-    logger.info(f"Bourso import complete: {days_processed} days imported, {total_days - days_processed} already present")
+    logger.info(
+        f"Bourso import complete: {days_processed} days imported, "
+        f"{days_known} already present, {days_unreadable} unreadable"
+    )
 
 
 # ---- Decorator ----
