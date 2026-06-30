@@ -26,6 +26,11 @@ services:
       database:
         condition: service_healthy
     networks: [ boursenet ]
+    environment:
+      - EURONEXT_START=${EURONEXT_START:-2020-05-01}
+      - EURONEXT_END=${EURONEXT_END:-2022-09-16}
+      - BOURSO_START=${BOURSO_START:-2020-01-01}
+      - BOURSO_END=${BOURSO_END:-2022-01-01}
     ports:
       - "8050:8050"
     restart: on-failure:3
