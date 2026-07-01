@@ -54,7 +54,8 @@ def get_daystocks(cids, start_date, end_date):
         return pd.DataFrame()
     query = """
         SELECT d.date, d.cid, d.open, d.close, d.high, d.low, d.volume, d.mean, d.std,
-               c.name, c.name || ' - ' || COALESCE(m.name, 'Unknown') AS label
+               c.name,
+               c.name || ' (' || c.symbol || ') - ' || COALESCE(m.name, 'Unknown') AS label
         FROM daystocks d
         JOIN companies c ON c.id = d.cid
         LEFT JOIN markets m ON m.id = c.mid
@@ -172,7 +173,10 @@ def init_controls(_):
     companies = get_companies()
     logger.info(f"Found {len(companies)} companies in database")
     options = [
-        {"label": f"{row['name']} - {row['market']}", "value": row["id"]}
+        {
+            "label": f"{row['name']} ({row['symbol']}) - {row['market']}",
+            "value": row["id"],
+        }
         for _, row in companies.iterrows()
     ]
 
