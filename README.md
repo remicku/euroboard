@@ -3,8 +3,8 @@
 Interactive dashboard for European stock market data, backed by a TimescaleDB
 hypertable store and an ETL pipeline that ingests raw exchange data files.
 
-Two years of Paris, Amsterdam, Brussels and Milan equities — roughly 12 million
-intraday points across 1 300+ companies — queried interactively from the browser.
+Six years of Paris, Amsterdam, Brussels and Milan equities — up to 48 million
+intraday points across 1 500 listings — queried interactively from the browser.
 
 ![EuroBoard dashboard](docs/images/overview.png)
 
@@ -66,13 +66,13 @@ The result should look like this:
 
 ```
 data/
-├── bourso/            # Boursorama intraday snapshots
-│   ├── 2020/          #   one directory per year
-│   │   └── compA 2020-01-02 09:05:02.123456.bz2
-│   └── 2021/
-└── euronext/          # Euronext end-of-day exports
-    ├── Euronext_Equities_2020-05-04.csv
-    └── Euronext_Equities_2022-10-20.xlsx
+├── bourso/            # Boursorama intraday snapshots, 2019-2024
+│   ├── 2019/          #   one directory per year
+│   │   └── compA 2019-01-02 09:05:02.123456.bz2
+│   └── ...
+└── euronext/          # Euronext end-of-day exports, 2020-2024
+    ├── Euronext_Equities_2020-05-04.csv    # CSV until 2022-09
+    └── Euronext_Equities_2022-10-20.xlsx   # XLSX from 2022-10
 ```
 
 Without it the application still starts, but the stock selector comes up empty.
@@ -86,9 +86,20 @@ docker compose up --build
 The dashboard is served at <http://localhost:8050>.
 
 On startup the application imports the configured date ranges, then serves. The
-first run takes a few minutes; later runs skip what is already imported. The
-database lives in a named Docker volume, so it survives `docker compose down`
-and machine restarts — use `docker compose down -v` to start from an empty one.
+default range is a two-year slice, which takes about fifteen minutes to load;
+widening it to the whole archive takes closer to an hour and yields some 48
+million intraday points. Later runs skip what is already imported, per Euronext
+file and per Boursorama day, so an interrupted import resumes rather than starts
+over. The database lives in a named Docker volume, so it survives
+`docker compose down` and machine restarts — use `docker compose down -v` to
+start from an empty one.
+
+To load everything the archive has:
+
+```bash
+BOURSO_START=2019-01-01 BOURSO_END=2025-01-01 EURONEXT_END=2025-01-01 \
+  docker compose up -d
+```
 
 ### Configuration
 
