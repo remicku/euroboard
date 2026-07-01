@@ -33,23 +33,48 @@ db = tsdb.TimescaleStockMarketModel("bourse", "bourse", "database", "password")
 
 
 def get_companies():
-    """Get the companies, each labelled with the market it is listed on.
+    """Get the tradeable listings, each labelled with the market it is on.
 
     A company cross-listed on two exchanges has one entry per market, with its
     own order book, so the market has to be part of how it is identified.
+
+    Dormant listings are left out. Boursorama keeps quoting a line long after it
+    stops trading, repeating its last close: 349 of the 1606 listings never trade
+    at all over the whole archive, and others trade a handful of times in six
+    years. Plotted, both become a straight line that reads as a trend and is
+    none.
+
+    A listing is kept when it traded on at least a tenth of the days it was
+    quoted. Below that a daily series is mostly interpolation between rare
+    prints, and the 20-day average behind the Bollinger tab means nothing. The
+    cutoff is a judgement call: it drops 41 listings, and every one of them
+    traded less than one day in ten. It is deliberately a ratio and not a count,
+    so a short-lived instrument that traded throughout its life -- a warrant
+    quoted for 18 days and traded on all 18 -- is kept.
     """
     return db.df_query(
         """
         SELECT c.id, c.name, c.symbol, COALESCE(m.name, 'Unknown') AS market
         FROM companies c
         LEFT JOIN markets m ON m.id = c.mid
+        JOIN (
+            SELECT cid FROM daystocks
+            GROUP BY cid
+            HAVING count(*) FILTER (WHERE volume > 0) >= 0.10 * count(*)
+        ) traded ON traded.cid = c.id
         ORDER BY c.name, market
         """
     )
 
 
 def get_daystocks(cids, start_date, end_date):
-    """Get daily stock data for given company ids and date range."""
+    """Get the daily aggregates of a set of listings over a date range.
+
+    Days without a single trade are skipped: on those Boursorama reports the
+    previous close again, so open, close, high and low are all equal and the
+    volume is zero. Keeping them drew flat segments across months of inactivity.
+    An actively traded stock loses 2 to 4 days out of 1400 this way.
+    """
     if not cids:
         return pd.DataFrame()
     query = """
@@ -60,6 +85,7 @@ def get_daystocks(cids, start_date, end_date):
         JOIN companies c ON c.id = d.cid
         LEFT JOIN markets m ON m.id = c.mid
         WHERE d.cid = ANY(%(cids)s) AND d.date >= %(start)s AND d.date <= %(end)s
+          AND d.volume > 0
         ORDER BY d.date
     """
     return db.df_query(
