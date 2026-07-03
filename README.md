@@ -4,7 +4,8 @@ Interactive dashboard for European stock market data, backed by a TimescaleDB
 hypertable store and an ETL pipeline that ingests raw exchange data files.
 
 Six years of Paris, Amsterdam, Brussels and Milan equities — up to 48 million
-intraday points across 1 500 listings — queried interactively from the browser.
+intraday quotes over 1 606 listings, of which the 1 216 that actually trade are
+offered for exploration — queried interactively from the browser.
 
 ![EuroBoard dashboard](docs/images/overview.png)
 
@@ -21,6 +22,11 @@ intraday points across 1 500 listings — queried interactively from the browser
   volume; sortable, filterable, exportable to CSV.
 - **Performance comparison**: several stocks normalised to percent change from
   the start of the selected period, with a traded-volume chart alongside.
+- **Dormant listings filtered out**: an exchange keeps quoting a line after it
+  stops trading, repeating its last close. Those quotes are stored but not
+  offered — a listing has to have traded on at least a tenth of the days it was
+  quoted, and only days with an actual trade are plotted. Without this a line
+  that has not changed hands in years still draws a confident flat trend.
 
 ## Architecture
 
@@ -88,7 +94,7 @@ The dashboard is served at <http://localhost:8050>.
 On startup the application imports the configured date ranges, then serves. The
 default range is a two-year slice, which takes about fifteen minutes to load;
 widening it to the whole archive takes closer to an hour and yields some 48
-million intraday points. Later runs skip what is already imported, per Euronext
+million intraday quotes. Later runs skip what is already imported, per Euronext
 file and per Boursorama day, so an interrupted import resumes rather than starts
 over. The database lives in a named Docker volume, so it survives
 `docker compose down` and machine restarts — use `docker compose down -v` to
