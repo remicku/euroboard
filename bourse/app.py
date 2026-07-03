@@ -103,6 +103,12 @@ def get_intraday(cids, day):
     midnight. Only the former describes a session, so the midnight row is left
     out -- it would otherwise hang a point eight hours before the open, and its
     volume is the exchange's own daily total, on a different basis.
+
+    Snapshots outside 06:00-18:00 are dropped too. From July 2024 the collector
+    also fires once at 19:00, long after Euronext Paris closes at 17:30, and
+    since the market is shut it returns the closing price and volume unchanged:
+    37 sessions carry that repeat, which drew a flat line stretching the session
+    by seventy minutes.
     """
     if not cids or not day:
         return pd.DataFrame()
@@ -114,7 +120,7 @@ def get_intraday(cids, day):
         LEFT JOIN markets m ON m.id = c.mid
         WHERE s.cid = ANY(%(cids)s)
           AND s.date >= %(day)s AND s.date < %(day)s::date + 1
-          AND (s.date AT TIME ZONE 'UTC')::time <> '00:00:00'
+          AND (s.date AT TIME ZONE 'UTC')::time BETWEEN '06:00' AND '18:00'
         ORDER BY s.date
     """
     return db.df_query(
@@ -124,22 +130,35 @@ def get_intraday(cids, day):
     )
 
 
-def get_last_intraday_day(cids, start_date, end_date):
-    """Latest session in the range for which intraday snapshots exist."""
+def get_disabled_days(sessions, first, last):
+    """Calendar days between first and last that hold no session."""
+    if not sessions:
+        return []
+    have = set(sessions)
+    span = pd.date_range(first, last, freq="D")
+    return [str(d.date()) for d in span if str(d.date()) not in have]
+
+
+def get_intraday_sessions(cids, start_date, end_date):
+    """Sessions in the range for which intraday snapshots exist, most recent first.
+
+    The archive is not continuous -- 2024 holds 143 sessions where a full year
+    of trading would hold about 250 -- so the calendar disables every day that
+    holds nothing rather than letting one be picked and come up empty.
+    """
     if not cids:
-        return None
+        return []
     df = db.df_query(
         """
-        SELECT max(s.date) AS d FROM stocks s
+        SELECT DISTINCT (s.date AT TIME ZONE 'UTC')::date AS d FROM stocks s
         WHERE s.cid = ANY(%(cids)s)
           AND s.date >= %(start)s AND s.date <= %(end)s
-          AND (s.date AT TIME ZONE 'UTC')::time <> '00:00:00'
+          AND (s.date AT TIME ZONE 'UTC')::time BETWEEN '06:00' AND '18:00'
+        ORDER BY d DESC
         """,
         params={"cids": [int(c) for c in cids], "start": start_date, "end": end_date},
     )
-    if df.empty or pd.isna(df["d"].iloc[0]):
-        return None
-    return str(pd.to_datetime(df["d"].iloc[0]).date())
+    return [] if df.empty else [str(d) for d in df["d"]]
 
 
 # =====================================================================
@@ -190,6 +209,22 @@ app.layout = dbc.Container(
                             inline=True,
                         ),
                     ],
+                    md=2,
+                ),
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.Label("Session", className="fw-bold"),
+                            html.Br(),
+                            dcc.DatePickerSingle(
+                                id="intraday-day",
+                                display_format="YYYY-MM-DD",
+                                placeholder="Session",
+                            ),
+                        ],
+                        id="intraday-controls",
+                        style={"display": "none"},
+                    ),
                     md=2,
                 ),
                 dbc.Col(
@@ -277,8 +312,11 @@ def init_controls(_):
     Input("date-range", "end_date"),
     Input("chart-type", "value"),
     Input("scale-type", "value"),
+    Input("intraday-day", "date"),
 )
-def render_tab(active_tab, selected_stocks, start_date, end_date, chart_type, scale_type):
+def render_tab(
+    active_tab, selected_stocks, start_date, end_date, chart_type, scale_type, intraday_day
+):
     """Render the content of the active tab."""
     if not selected_stocks or not start_date or not end_date:
         return dbc.Alert("Select at least one stock and a date range.", color="info")
@@ -294,7 +332,7 @@ def render_tab(active_tab, selected_stocks, start_date, end_date, chart_type, sc
     elif active_tab == "tab-performance":
         return render_performance(cids, start_date, end_date)
     elif active_tab == "tab-intraday":
-        return render_intraday(cids, start_date, end_date, scale_type)
+        return render_intraday(cids, intraday_day, scale_type)
 
     return html.Div()
 
@@ -532,59 +570,25 @@ def render_performance(cids, start_date, end_date):
     return html.Div([dcc.Graph(figure=fig), dcc.Graph(figure=vol_fig)])
 
 
-def render_intraday(cids, start_date, end_date, scale_type):
-    """Render the session picker and the intraday chart below it."""
-    day = get_last_intraday_day(cids, start_date, end_date)
-    if day is None:
+def render_intraday(cids, day, scale_type):
+    """Draw the price path of one session.
+
+    Rendered straight from render_tab rather than filled by a second callback:
+    a dcc.Graph and a dcc.Dropdown sitting together inside dynamically created
+    tab content leave the Dash 4 client unable to re-render, and the tab empties
+    on the next click anywhere on the page. The session picker therefore lives
+    in the control bar, where inputs and graphs already coexist.
+    """
+    if not day:
         return dbc.Alert(
-            "No intraday snapshot for this selection. Boursorama covers "
-            "2019 to 2024; outside that only the Euronext daily close is stored.",
+            "No intraday snapshot for this selection. Boursorama covers 2019 to "
+            "2024; outside that only the Euronext daily close is stored.",
             color="warning",
         )
 
-    return html.Div(
-        [
-            dbc.Row(
-                dbc.Col(
-                    [
-                        html.Label("Session", className="fw-bold"),
-                        dcc.DatePickerSingle(
-                            id="intraday-day",
-                            date=day,
-                            min_date_allowed=start_date,
-                            max_date_allowed=end_date,
-                            display_format="YYYY-MM-DD",
-                        ),
-                    ],
-                    md=3,
-                ),
-                className="mb-3",
-            ),
-            dcc.Store(id="intraday-scale", data=scale_type),
-            html.Div(id="intraday-graph"),
-        ]
-    )
-
-
-@callback(
-    Output("intraday-graph", "children"),
-    Input("intraday-day", "date"),
-    Input("stock-selector", "value"),
-    Input("intraday-scale", "data"),
-)
-def render_intraday_graph(day, selected_stocks, scale_type):
-    """Draw the price path of the chosen session."""
-    if not selected_stocks or not day:
-        return dbc.Alert("Select at least one stock.", color="info")
-
-    cids = selected_stocks if isinstance(selected_stocks, list) else [selected_stocks]
     df = get_intraday(cids, day)
     if df.empty:
-        return dbc.Alert(
-            f"No intraday snapshot on {day}. Markets are closed at weekends and "
-            "on holidays, and the archive has gaps.",
-            color="warning",
-        )
+        return dbc.Alert(f"No intraday snapshot on {day}.", color="warning")
 
     # Intraday moves are fractions of a percent. Several stocks quoted at 85 and
     # at 650 share no readable axis, so compare them on their move since the
@@ -630,13 +634,45 @@ def render_intraday_graph(day, selected_stocks, scale_type):
         height=600,
     )
 
-    sessions = df.groupby("label")["date"].agg(["min", "max", "count"])
+    spans = df.groupby("label")["date"].agg(["min", "max", "count"])
     note = "  ·  ".join(
         f"{label}: {int(row['count'])} snapshots, "
         f"{row['min'].strftime('%H:%M')} to {row['max'].strftime('%H:%M')}"
-        for label, row in sessions.iterrows()
+        for label, row in spans.iterrows()
     )
     return html.Div([dcc.Graph(figure=fig), html.Small(note, className="text-muted")])
+
+
+@callback(
+    Output("intraday-controls", "style"),
+    Input("tabs", "active_tab"),
+)
+def toggle_intraday_controls(active_tab):
+    """The session picker only means anything on the intraday tab."""
+    return {} if active_tab == "tab-intraday" else {"display": "none"}
+
+
+@callback(
+    Output("intraday-day", "date"),
+    Output("intraday-day", "min_date_allowed"),
+    Output("intraday-day", "max_date_allowed"),
+    Output("intraday-day", "disabled_days"),
+    Input("stock-selector", "value"),
+    Input("date-range", "start_date"),
+    Input("date-range", "end_date"),
+)
+def set_intraday_sessions(selected_stocks, start_date, end_date):
+    """Restrict the calendar to the sessions that actually hold snapshots."""
+    if not selected_stocks or not start_date or not end_date:
+        return None, None, None, []
+
+    cids = selected_stocks if isinstance(selected_stocks, list) else [selected_stocks]
+    sessions = get_intraday_sessions(cids, start_date, end_date)
+    if not sessions:
+        return None, None, None, []
+
+    first, last = sessions[-1], sessions[0]
+    return last, first, last, get_disabled_days(sessions, first, last)
 
 
 # =====================================================================
