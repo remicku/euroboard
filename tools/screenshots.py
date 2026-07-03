@@ -24,6 +24,7 @@ TABS = [
     ("Bollinger", "bollinger"),
     ("Raw data", "table"),
     ("Performance comparison", "performance"),
+    ("Intraday", "intraday"),
 ]
 
 
