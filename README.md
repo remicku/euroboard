@@ -3,9 +3,10 @@
 Interactive dashboard for European stock market data, backed by a TimescaleDB
 hypertable store and an ETL pipeline that ingests raw exchange data files.
 
-Six years of Paris, Amsterdam, Brussels and Milan equities — up to 48 million
+Six years of Paris, Amsterdam, Brussels and Milan equities — up to 52 million
 intraday quotes over 1 606 listings, of which the 1 216 that actually trade are
-offered for exploration — queried interactively from the browser.
+offered for exploration — queried interactively from the browser, down to the
+ten-minute snapshot.
 
 ![EuroBoard dashboard](docs/images/overview.png)
 
@@ -22,6 +23,10 @@ offered for exploration — queried interactively from the browser.
   volume; sortable, filterable, exportable to CSV.
 - **Performance comparison**: several stocks normalised to percent change from
   the start of the selected period, with a traded-volume chart alongside.
+- **Intraday**: the price path of a single session, snapshot by snapshot, which
+  is what the daily aggregates flatten into one OHLC row. Several listings are
+  compared on their move since the open, since a stock quoted at 85 and one at
+  650 share no readable axis over moves of a fraction of a percent.
 - **Dormant listings filtered out**: an exchange keeps quoting a line after it
   stops trading, repeating its last close. Those quotes are stored but not
   offered — a listing has to have traded on at least a tenth of the days it was
@@ -137,6 +142,8 @@ Dockerfile                 # uv-based build
 
 ## Screenshots
 
+Regenerate them from a running dashboard with `tools/screenshots.py`.
+
 **Prices** — line or candlestick, linear or logarithmic.
 
 ![Price chart](docs/images/prices.png)
@@ -152,3 +159,7 @@ Dockerfile                 # uv-based build
 **Performance comparison** — normalised to percent change, with traded volume.
 
 ![Performance comparison](docs/images/performance.png)
+
+**Intraday** — one session, snapshot by snapshot.
+
+![Intraday](docs/images/intraday.png)
