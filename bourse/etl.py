@@ -53,30 +53,49 @@ def _to_number(series: pd.Series) -> pd.Series:
     closing price, "315.000(s)" a suspended one -- and thousands are separated
     by a space: "1 157.500". Reading them as-is silently dropped about 40% of
     every snapshot.
+
+    The decimal separator is not stable either: part of 2024 is written the
+    French way, "58,010(c)". No file ever mixes the two, so the comma can be
+    mapped to a dot without guessing which role it plays.
     """
     return pd.to_numeric(
         series.astype(str)
         .str.replace(r"\([a-zA-Z]\)", "", regex=True)
-        .str.replace(r"[\s\u00a0\u202f]", "", regex=True),
+        .str.replace(r"[\s\u00a0\u202f]", "", regex=True)
+        .str.replace(",", ".", regex=False),
         errors="coerce",
     )
 
 
+def _open_bourso_file(filepath: str):
+    """Open a snapshot whatever the archive compressed it with.
+
+    Snapshots are bz2-compressed pickles up to 2023 and raw pickles from 2024,
+    where the .bz2 suffix was dropped too. Sniff the magic bytes rather than
+    trust the name: relying on the extension silently skipped all of 2024.
+    """
+    with open(filepath, "rb") as probe:
+        compressed = probe.read(3) == b"BZh"
+    return bz2.open(filepath, "rb") if compressed else open(filepath, "rb")
+
+
 def _parse_bourso_file(filepath: str):
-    """Parse a boursorama bz2 pickle file. Returns (datetime, DataFrame) or None."""
+    """Parse a boursorama snapshot. Returns a DataFrame, or None if unreadable."""
     filename = os.path.basename(filepath)
-    match = re.match(r"comp[AB]\s+(.+)\.bz2$", filename)
+    match = re.match(r"comp[AB]\s+(.+)$", filename)
     if not match:
         return None
 
     dt_str = match.group(1)
+    if dt_str.endswith(".bz2"):
+        dt_str = dt_str[: -len(".bz2")]
     try:
         dt = pd.to_datetime(dt_str)
     except Exception:
         return None
 
     try:
-        with bz2.open(filepath, "rb") as f:
+        with _open_bourso_file(filepath) as f:
             df = _CompatUnpickler(f).load()
     except Exception:
         return None
@@ -388,8 +407,6 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
         if not os.path.isdir(year_path):
             continue
         for f in os.listdir(year_path):
-            if not f.endswith(".bz2"):
-                continue
             match = re.match(r"comp[AB]\s+(\d{4}-\d{2}-\d{2})\s", f)
             if not match:
                 continue
@@ -474,6 +491,14 @@ def _store_bourso_files(start: str, end: str, db: TSDB):
         day_df["cid"] = day_df["cid"].astype(int)
 
         # ---- Insert into stocks (all intraday points) ----
+        if day_df.empty:
+            days_unreadable += 1
+            logger.warning(
+                f"Bourso: {len(day_files)} files for {day_str} parsed but held no "
+                "usable quote"
+            )
+            continue
+
         stocks_df = day_df[["datetime", "cid", "last", "volume"]].rename(
             columns={"datetime": "date", "last": "value"}
         )
