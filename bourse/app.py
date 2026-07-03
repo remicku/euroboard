@@ -95,6 +95,53 @@ def get_daystocks(cids, start_date, end_date):
     )
 
 
+def get_intraday(cids, day):
+    """Get the intraday path of a set of listings over a single session.
+
+    The stocks table holds both sources: Boursorama snapshots taken every ten
+    minutes through the session, and the Euronext end-of-day row, written at
+    midnight. Only the former describes a session, so the midnight row is left
+    out -- it would otherwise hang a point eight hours before the open, and its
+    volume is the exchange's own daily total, on a different basis.
+    """
+    if not cids or not day:
+        return pd.DataFrame()
+    query = """
+        SELECT s.date, s.cid, s.value, s.volume,
+               c.name || ' (' || c.symbol || ') - ' || COALESCE(m.name, 'Unknown') AS label
+        FROM stocks s
+        JOIN companies c ON c.id = s.cid
+        LEFT JOIN markets m ON m.id = c.mid
+        WHERE s.cid = ANY(%(cids)s)
+          AND s.date >= %(day)s AND s.date < %(day)s::date + 1
+          AND (s.date AT TIME ZONE 'UTC')::time <> '00:00:00'
+        ORDER BY s.date
+    """
+    return db.df_query(
+        query,
+        params={"cids": [int(c) for c in cids], "day": day},
+        parse_dates=["date"],
+    )
+
+
+def get_last_intraday_day(cids, start_date, end_date):
+    """Latest session in the range for which intraday snapshots exist."""
+    if not cids:
+        return None
+    df = db.df_query(
+        """
+        SELECT max(s.date) AS d FROM stocks s
+        WHERE s.cid = ANY(%(cids)s)
+          AND s.date >= %(start)s AND s.date <= %(end)s
+          AND (s.date AT TIME ZONE 'UTC')::time <> '00:00:00'
+        """,
+        params={"cids": [int(c) for c in cids], "start": start_date, "end": end_date},
+    )
+    if df.empty or pd.isna(df["d"].iloc[0]):
+        return None
+    return str(pd.to_datetime(df["d"].iloc[0]).date())
+
+
 # =====================================================================
 # Layout
 # =====================================================================
@@ -170,6 +217,7 @@ app.layout = dbc.Container(
                 dbc.Tab(label="Bollinger", tab_id="tab-bollinger"),
                 dbc.Tab(label="Raw data", tab_id="tab-data"),
                 dbc.Tab(label="Performance comparison", tab_id="tab-performance"),
+                dbc.Tab(label="Intraday", tab_id="tab-intraday"),
             ],
             id="tabs",
             active_tab="tab-prices",
@@ -245,6 +293,8 @@ def render_tab(active_tab, selected_stocks, start_date, end_date, chart_type, sc
         return render_data_table(cids, start_date, end_date)
     elif active_tab == "tab-performance":
         return render_performance(cids, start_date, end_date)
+    elif active_tab == "tab-intraday":
+        return render_intraday(cids, start_date, end_date, scale_type)
 
     return html.Div()
 
@@ -480,6 +530,113 @@ def render_performance(cids, start_date, end_date):
     )
 
     return html.Div([dcc.Graph(figure=fig), dcc.Graph(figure=vol_fig)])
+
+
+def render_intraday(cids, start_date, end_date, scale_type):
+    """Render the session picker and the intraday chart below it."""
+    day = get_last_intraday_day(cids, start_date, end_date)
+    if day is None:
+        return dbc.Alert(
+            "No intraday snapshot for this selection. Boursorama covers "
+            "2019 to 2024; outside that only the Euronext daily close is stored.",
+            color="warning",
+        )
+
+    return html.Div(
+        [
+            dbc.Row(
+                dbc.Col(
+                    [
+                        html.Label("Session", className="fw-bold"),
+                        dcc.DatePickerSingle(
+                            id="intraday-day",
+                            date=day,
+                            min_date_allowed=start_date,
+                            max_date_allowed=end_date,
+                            display_format="YYYY-MM-DD",
+                        ),
+                    ],
+                    md=3,
+                ),
+                className="mb-3",
+            ),
+            dcc.Store(id="intraday-scale", data=scale_type),
+            html.Div(id="intraday-graph"),
+        ]
+    )
+
+
+@callback(
+    Output("intraday-graph", "children"),
+    Input("intraday-day", "date"),
+    Input("stock-selector", "value"),
+    Input("intraday-scale", "data"),
+)
+def render_intraday_graph(day, selected_stocks, scale_type):
+    """Draw the price path of the chosen session."""
+    if not selected_stocks or not day:
+        return dbc.Alert("Select at least one stock.", color="info")
+
+    cids = selected_stocks if isinstance(selected_stocks, list) else [selected_stocks]
+    df = get_intraday(cids, day)
+    if df.empty:
+        return dbc.Alert(
+            f"No intraday snapshot on {day}. Markets are closed at weekends and "
+            "on holidays, and the archive has gaps.",
+            color="warning",
+        )
+
+    # Intraday moves are fractions of a percent. Several stocks quoted at 85 and
+    # at 650 share no readable axis, so compare them on their move since the
+    # open; a single one is more useful at its actual price.
+    compare = df["label"].nunique() > 1
+
+    fig = go.Figure()
+    for label, group in df.groupby("label"):
+        group = group.sort_values("date")
+        if compare:
+            first = group["value"].iloc[0]
+            y = ((group["value"] / first) - 1) * 100 if first else group["value"]
+            hover = "%{x|%H:%M} — %{y:+.2f}%<extra></extra>"
+        else:
+            y = group["value"]
+            hover = "%{x|%H:%M} — %{y:.2f}<extra></extra>"
+        fig.add_trace(
+            go.Scatter(
+                x=group["date"],
+                y=y,
+                mode="lines+markers",
+                marker=dict(size=4),
+                name=label,
+                hovertemplate=hover,
+            )
+        )
+
+    if compare:
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+
+    fig.update_layout(
+        title=(
+            f"Intraday change since the open — {day}"
+            if compare
+            else f"Intraday prices — {day}"
+        ),
+        xaxis_title="Time",
+        yaxis_title="Change (%)" if compare else "Price",
+        yaxis_type="linear" if compare else (scale_type or "linear"),
+        xaxis_tickformat="%H:%M",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=600,
+    )
+
+    sessions = df.groupby("label")["date"].agg(["min", "max", "count"])
+    note = "  ·  ".join(
+        f"{label}: {int(row['count'])} snapshots, "
+        f"{row['min'].strftime('%H:%M')} to {row['max'].strftime('%H:%M')}"
+        for label, row in sessions.iterrows()
+    )
+    return html.Div([dcc.Graph(figure=fig), html.Small(note, className="text-muted")])
 
 
 # =====================================================================
