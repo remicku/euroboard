@@ -182,7 +182,7 @@ app.layout = dbc.Container(
                             placeholder="Select one or more stocks...",
                         ),
                     ],
-                    md=4,
+                    md=3,
                 ),
                 dbc.Col(
                     [
@@ -219,11 +219,14 @@ app.layout = dbc.Container(
                             dcc.DatePickerSingle(
                                 id="intraday-day",
                                 display_format="YYYY-MM-DD",
-                                placeholder="Session",
                             ),
                         ],
                         id="intraday-controls",
-                        style={"display": "none"},
+                        # mounted visible on purpose: the picker measures its
+                        # own width once, at mount, and a hidden element
+                        # measures as nothing. The callback below hides it
+                        # immediately for every tab but the intraday one.
+                        style={},
                     ),
                     md=2,
                 ),

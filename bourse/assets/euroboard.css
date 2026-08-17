@@ -1,0 +1,8 @@
+/* Dash 4 sizes the date picker's input from the text it measures at mount and
+   settles on a couple of pixels here, leaving the control invisible. Give it a
+   width of its own; the component writes its measurement inline, so this has to
+   outrank it. */
+#intraday-day {
+    width: 140px !important;
+    box-sizing: border-box !important;
+}
