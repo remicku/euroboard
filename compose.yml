@@ -3,6 +3,7 @@ services:
     image: timescale/timescaledb:latest-pg17
     container_name: bourse-database
     command: postgres -c shared_preload_libraries=timescaledb
+    restart: unless-stopped
     networks: [ boursenet ]
     environment:
       - PGDATA=/var/lib/postgresql/data/timescaledb
