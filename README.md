@@ -4,7 +4,7 @@ Interactive dashboard for European stock market data, backed by a TimescaleDB
 hypertable store and an ETL pipeline that ingests raw exchange data files.
 
 Six years of Paris, Amsterdam, Brussels and Milan equities — up to 52 million
-intraday quotes over 1 606 listings, of which the 1 216 that actually trade are
+intraday quotes over 1 616 listings, of which the 1 219 that actually trade are
 offered for exploration — queried interactively from the browser, down to the
 ten-minute snapshot.
 
@@ -12,8 +12,8 @@ ten-minute snapshot.
 
 ## Features
 
-- **ETL pipeline**: ingests Boursorama intraday snapshots (bz2 pickles, one
-  directory per year) and Euronext end-of-day exports (CSV/XLSX), resolves
+- **ETL pipeline**: ingests Boursorama intraday snapshots (pickles, bz2 or raw
+  depending on the year) and Euronext end-of-day exports (CSV or XLSX), resolves
   companies and markets, and writes to TimescaleDB in batches. Progress is
   recorded per Euronext file and per Boursorama day, so an interrupted import
   resumes where it stopped instead of starting over.
@@ -36,7 +36,7 @@ ten-minute snapshot.
 ## Architecture
 
 ```
-data/*.bz2, *.csv, *.xlsx          raw exchange files, mounted read-only
+data/  snapshots, csv, xlsx         raw exchange files, mounted read-only
          │
          ▼
     bourse/etl.py                  parse ─ resolve companies ─ batch COPY
@@ -77,20 +77,20 @@ drifts across that span without any version marker.
 
 None of these announce themselves. Read naively, the extension check alone
 skipped 15 054 files, the pickle change cost 98 sessions, and the status markers
-turned roughly 40% of every snapshot into missing values -- all of it silently,
+turned roughly 40% of every snapshot into missing values — all of it silently,
 because a parser that returns nothing looks exactly like a day the market was
 closed. The import now reports unreadable sessions rather than swallowing them.
 
 The two sources also disagree about what a company is. Boursorama prefixes its
 symbols with a market code and carries no ISIN, Euronext uses the bare symbol
 and does: nothing matched, so a company present in both was created twice and
-its history split down the middle -- 248 names were duplicated that way. A
+its history split down the middle — 248 names were duplicated that way. A
 cross-listed stock reads "Euronext Paris, Amsterdam, Brussels", and filing it
 under the first market found rather than the first market named put Saint-Gobain
 on the Amsterdam book, where it had not traded in six years.
 
 What survives is not all worth showing either. An exchange keeps quoting a line
-long after it stops trading, repeating its last close, and 349 of the 1 606
+long after it stops trading, repeating its last close, and 352 of the 1 616
 listings never trade at all over the whole archive. Those quotes are stored but
 not offered: a flat line reads as a trend, a moving average of a constant is
 that constant, and Bollinger bands around it have zero width.
@@ -115,7 +115,8 @@ data/
 ├── bourso/            # Boursorama intraday snapshots, 2019-2024
 │   ├── 2019/          #   one directory per year
 │   │   └── compA 2019-01-02 09:05:02.123456.bz2
-│   └── ...
+│   └── 2024/          #   no .bz2 suffix from 2024, and no longer compressed
+│       └── compA 2024-01-15 09:02:01.771435
 └── euronext/          # Euronext end-of-day exports, 2020-2024
     ├── Euronext_Equities_2020-05-04.csv    # CSV until 2022-09
     └── Euronext_Equities_2022-10-20.xlsx   # XLSX from 2022-10
@@ -133,7 +134,7 @@ The dashboard is served at <http://localhost:8050>.
 
 On startup the application imports the configured date ranges, then serves. The
 default range is a two-year slice, which takes about fifteen minutes to load;
-widening it to the whole archive takes closer to an hour and yields some 48
+widening it to the whole archive takes closer to an hour and yields some 52
 million intraday quotes. Later runs skip what is already imported, per Euronext
 file and per Boursorama day, so an interrupted import resumes rather than starts
 over. The database lives in a named Docker volume, so it survives
@@ -169,7 +170,7 @@ reloads on save without rebuilding the image.
 uv run --group dev pytest
 ```
 
-The suite covers the parts that read the archive -- container format, decimal
+The suite covers the parts that read the archive — container format, decimal
 separator, status markers, symbol prefixes, market attribution. Every case
 stands for a variation the source actually contains, several of which cost real
 data before they were found.
